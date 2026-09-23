@@ -174,3 +174,57 @@ where not exists (
     and d.start_time=s.start_time::time
     and d.end_time=s.end_time::time
 );
+
+
+-- Returns one structured availability context for the n8n slot engine.
+create or replace function public.dental_availability_context(
+  p_clinic_id text,
+  p_dentist_id text,
+  p_service_id text,
+  p_date date
+)
+returns jsonb
+language sql
+stable
+as $$
+  select jsonb_build_object(
+    'clinic', to_jsonb(c),
+    'dentist', to_jsonb(d),
+    'service', to_jsonb(s),
+    'schedule', coalesce((
+      select jsonb_agg(to_jsonb(sc) order by sc.start_time)
+      from public.dental_schedules sc
+      where sc.dentist_id = p_dentist_id
+        and sc.active = true
+        and sc.weekday = extract(dow from p_date)::integer
+    ), '[]'::jsonb),
+    'closures', coalesce((
+      select jsonb_agg(to_jsonb(cl) order by cl.starts_at)
+      from public.dental_closures cl
+      where cl.clinic_id = p_clinic_id
+        and (cl.dentist_id is null or cl.dentist_id = p_dentist_id)
+        and (cl.starts_at at time zone c.timezone)::date <= p_date
+        and (cl.ends_at at time zone c.timezone)::date >= p_date
+    ), '[]'::jsonb),
+    'appointments', coalesce((
+      select jsonb_agg(to_jsonb(a) order by a.start_time)
+      from public.dental_appointments a
+      where a.clinic_id = p_clinic_id
+        and a.dentist_id = p_dentist_id
+        and a.status in ('HELD','CONFIRMED','RESCHEDULED')
+        and (a.start_time at time zone c.timezone)::date = p_date
+    ), '[]'::jsonb)
+  )
+  from public.dental_clinics c
+  join public.dental_dentists d
+    on d.clinic_id = c.clinic_id and d.dentist_id = p_dentist_id and d.active = true
+  join public.dental_services s
+    on s.clinic_id = c.clinic_id and s.service_id = p_service_id and s.active = true
+  where c.clinic_id = p_clinic_id
+    and exists (
+      select 1
+      from public.dental_dentist_services ds
+      where ds.dentist_id = p_dentist_id
+        and ds.service_id = p_service_id
+    );
+$$;
