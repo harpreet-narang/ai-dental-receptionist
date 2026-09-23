@@ -1,0 +1,314 @@
+{
+  "name": "Dental Receptionist - Check Availability",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dental-check-availability",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "availability-webhook",
+      "name": "Check Availability Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $json.body ?? $json;\nconst required = ['clinic_id','dentist_id','service_id','date'];\nfor (const key of required) {\n  if (!String(src[key] ?? '').trim()) throw new Error(key + ' is required');\n}\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(String(src.date))) {\n  throw new Error('date must use YYYY-MM-DD');\n}\nconst part = String(src.part_of_day ?? 'any').toLowerCase();\nif (!['any','morning','afternoon','evening'].includes(part)) {\n  throw new Error('part_of_day must be any, morning, afternoon, or evening');\n}\nreturn [{json:{\n  clinic_id:String(src.clinic_id),\n  dentist_id:String(src.dentist_id),\n  service_id:String(src.service_id),\n  date:String(src.date),\n  part_of_day:part\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "normalize-availability",
+      "name": "Normalize Availability Request"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/dental_availability_context' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ p_clinic_id: $json.clinic_id, p_dentist_id: $json.dentist_id, p_service_id: $json.service_id, p_date: $json.date }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        464,
+        0
+      ],
+      "id": "load-availability-context",
+      "name": "Load Availability Context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $('Normalize Availability Request').first().json;\nconst context = $json;\nif (!context?.clinic || !context?.dentist || !context?.service) {\n  throw new Error('Clinic, dentist, or service configuration not found');\n}\nconst schedule = Array.isArray(context.schedule) ? context.schedule : [];\nif (!schedule.length) {\n  return [{json:{...req, context, no_working_hours:true, calendar_id:context.dentist.google_calendar_id || '', day_start:req.date+'T00:00:00', day_end:req.date+'T23:59:59'}}];\n}\nreturn [{json:{\n  ...req,\n  context,\n  no_working_hours:false,\n  calendar_id:String(context.dentist.google_calendar_id ?? ''),\n  day_start:req.date+'T00:00:00',\n  day_end:req.date+'T23:59:59'\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        0
+      ],
+      "id": "prepare-calendar-query",
+      "name": "Prepare Calendar Query"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-hours",
+              "leftValue": "={{ $json.no_working_hours }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        944,
+        0
+      ],
+      "id": "has-working-hours",
+      "name": "Dentist Working That Day?"
+    },
+    {
+      "parameters": {
+        "resource": "calendar",
+        "operation": "availability",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Prepare Calendar Query').first().json.calendar_id }}"
+        },
+        "timeMin": "={{ $('Prepare Calendar Query').first().json.day_start }}",
+        "timeMax": "={{ $('Prepare Calendar Query').first().json.day_end }}",
+        "options": {
+          "outputFormat": "raw",
+          "timezone": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('Prepare Calendar Query').first().json.context.clinic.timezone }}"
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1184,
+        -96
+      ],
+      "id": "google-busy",
+      "name": "Google Calendar Busy Times"
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $('Prepare Calendar Query').first().json;\nconst context = req.context;\nconst tz = context.clinic.timezone || 'Asia/Kolkata';\nconst busyRaw = $json?.calendars?.[req.calendar_id]?.busy ?? [];\nconst schedules = Array.isArray(context.schedule) ? context.schedule : [];\nconst closures = Array.isArray(context.closures) ? context.closures : [];\nconst appts = Array.isArray(context.appointments) ? context.appointments : [];\nconst duration = Number(context.service.duration_minutes || 30);\nconst buffer = Number(context.service.buffer_minutes || 0);\nconst interval = Number(context.clinic.slot_interval_minutes || 30);\n\nfunction zonedDateTimeToUtc(dateStr,timeStr,timeZone){\n  const [y,m,d]=dateStr.split('-').map(Number);\n  const [hh,mm,ss=0]=timeStr.split(':').map(Number);\n  let guess=new Date(Date.UTC(y,m-1,d,hh,mm,ss));\n  const fmt=new Intl.DateTimeFormat('en-US',{\n    timeZone,year:'numeric',month:'2-digit',day:'2-digit',\n    hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'\n  });\n  for(let n=0;n<2;n++){\n    const p=Object.fromEntries(fmt.formatToParts(guess).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));\n    const represented=Date.UTC(Number(p.year),Number(p.month)-1,Number(p.day),Number(p.hour),Number(p.minute),Number(p.second));\n    const wanted=Date.UTC(y,m-1,d,hh,mm,ss);\n    guess=new Date(guess.getTime() + (wanted-represented));\n  }\n  return guess;\n}\nfunction overlaps(start,end,rangeStart,rangeEnd){\n  return start < rangeEnd && end > rangeStart;\n}\nfunction matchesPart(date){\n  const h=Number(new Intl.DateTimeFormat('en-US',{timeZone:tz,hour:'2-digit',hourCycle:'h23'}).format(date));\n  if(req.part_of_day==='morning') return h<12;\n  if(req.part_of_day==='afternoon') return h>=12 && h<17;\n  if(req.part_of_day==='evening') return h>=17;\n  return true;\n}\n\nconst busy=[\n  ...busyRaw.map(x=>({start:new Date(x.start),end:new Date(x.end),source:'google'})),\n  ...appts.map(x=>({start:new Date(x.start_time),end:new Date(x.end_time),source:'appointment'})),\n  ...closures.map(x=>({start:new Date(x.starts_at),end:new Date(x.ends_at),source:'closure'}))\n];\n\nconst slots=[];\nfor(const row of schedules){\n  let cursor=zonedDateTimeToUtc(req.date,String(row.start_time).slice(0,8),tz);\n  const windowEnd=zonedDateTimeToUtc(req.date,String(row.end_time).slice(0,8),tz);\n  while(cursor < windowEnd){\n    const serviceEnd=new Date(cursor.getTime()+duration*60000);\n    const blockedEnd=new Date(serviceEnd.getTime()+buffer*60000);\n    if(blockedEnd<=windowEnd && matchesPart(cursor)){\n      const blocked=busy.some(b=>overlaps(cursor,blockedEnd,b.start,b.end));\n      if(!blocked){\n        slots.push({\n          start:cursor.toISOString(),\n          end:serviceEnd.toISOString(),\n          dentist_id:req.dentist_id,\n          service_id:req.service_id\n        });\n      }\n    }\n    cursor=new Date(cursor.getTime()+interval*60000);\n  }\n}\nreturn [{json:{\n  available:slots.length>0,\n  clinic_id:req.clinic_id,\n  dentist_id:req.dentist_id,\n  dentist_name:context.dentist.dentist_name,\n  service_id:req.service_id,\n  service_name:context.service.service_name,\n  date:req.date,\n  timezone:tz,\n  slots:slots.slice(0,5)\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        -96
+      ],
+      "id": "calculate-slots",
+      "name": "Calculate Valid Slots"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1664,
+        -96
+      ],
+      "id": "return-slots",
+      "name": "Return Available Slots"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ available:false, reason:'dentist_not_scheduled', slots:[], clinic_id:$('Prepare Calendar Query').first().json.clinic_id, dentist_id:$('Prepare Calendar Query').first().json.dentist_id, service_id:$('Prepare Calendar Query').first().json.service_id, date:$('Prepare Calendar Query').first().json.date }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1184,
+        112
+      ],
+      "id": "no-hours-result",
+      "name": "No Working Hours Result"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1424,
+        112
+      ],
+      "id": "return-no-hours",
+      "name": "Return No Availability"
+    }
+  ],
+  "connections": {
+    "Check Availability Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Availability Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Availability Request": {
+      "main": [
+        [
+          {
+            "node": "Load Availability Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Availability Context": {
+      "main": [
+        [
+          {
+            "node": "Prepare Calendar Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Calendar Query": {
+      "main": [
+        [
+          {
+            "node": "Dentist Working That Day?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dentist Working That Day?": {
+      "main": [
+        [
+          {
+            "node": "Google Calendar Busy Times",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Working Hours Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Calendar Busy Times": {
+      "main": [
+        [
+          {
+            "node": "Calculate Valid Slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Valid Slots": {
+      "main": [
+        [
+          {
+            "node": "Return Available Slots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Working Hours Result": {
+      "main": [
+        [
+          {
+            "node": "Return No Availability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "versionId": "portfolio-dental-availability-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
