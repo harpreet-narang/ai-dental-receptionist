@@ -1,0 +1,46 @@
+{
+  "clinic_id": "brightsmile-demo",
+  "clinic_name": "BrightSmile Dental Clinic",
+  "timezone": "Asia/Kolkata",
+  "address": "Sector 22, Chandigarh, India",
+  "phone": "+91-170-555-0101",
+  "whatsapp": "+91-99990-00001",
+  "opening_hours": {
+    "monday": ["09:00-13:00", "14:00-18:00"],
+    "tuesday": ["09:00-13:00", "14:00-18:00"],
+    "wednesday": ["09:00-13:00", "14:00-18:00"],
+    "thursday": ["09:00-13:00", "14:00-18:00"],
+    "friday": ["09:00-13:00", "14:00-18:00"],
+    "saturday": ["09:00-14:00"],
+    "sunday": []
+  },
+  "dentists": [
+    {
+      "dentist_id": "dr-aditi",
+      "name": "Dr. Aditi Mehta",
+      "specialty": "General Dentistry",
+      "calendar_id": "replace-with-google-calendar-id"
+    },
+    {
+      "dentist_id": "dr-rohan",
+      "name": "Dr. Rohan Kapoor",
+      "specialty": "Endodontics",
+      "calendar_id": "replace-with-google-calendar-id"
+    },
+    {
+      "dentist_id": "dr-neha",
+      "name": "Dr. Neha Verma",
+      "specialty": "Orthodontics",
+      "calendar_id": "replace-with-google-calendar-id"
+    }
+  ],
+  "services": [
+    {"service_id": "consultation", "name": "Dental Consultation", "duration_minutes": 20, "buffer_minutes": 10, "price_inr": 500},
+    {"service_id": "cleaning", "name": "Dental Cleaning", "duration_minutes": 30, "buffer_minutes": 10, "price_inr": 1500},
+    {"service_id": "filling", "name": "Dental Filling", "duration_minutes": 45, "buffer_minutes": 10, "price_inr": 2000},
+    {"service_id": "root-canal", "name": "Root Canal Appointment", "duration_minutes": 60, "buffer_minutes": 10, "price_inr": null},
+    {"service_id": "ortho-consult", "name": "Orthodontic Consultation", "duration_minutes": 30, "buffer_minutes": 10, "price_inr": 800}
+  ],
+  "slot_interval_minutes": 30,
+  "human_handoff_contact": "clinic-reception"
+}
