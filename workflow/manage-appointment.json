@@ -1,0 +1,761 @@
+{
+  "name": "Dental Receptionist - Manage Appointment",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dental-manage-appointment",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "manage-webhook",
+      "name": "Manage Appointment Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src=$json.body ?? $json;\nconst action=String(src.action ?? '').toLowerCase();\nif(!['reschedule','cancel'].includes(action)) throw new Error('action must be reschedule or cancel');\nfor(const key of ['clinic_id','patient_phone','appointment_id']){\n  if(!String(src[key] ?? '').trim()) throw new Error(key+' is required');\n}\nif(action==='reschedule' && !String(src.new_start_time ?? '').trim()) throw new Error('new_start_time is required for reschedule');\nreturn [{json:{\n  action,\n  clinic_id:String(src.clinic_id),\n  patient_phone:String(src.patient_phone),\n  appointment_id:String(src.appointment_id),\n  new_start_time:src.new_start_time ? new Date(src.new_start_time).toISOString() : null\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "normalize-manage",
+      "name": "Normalize Manage Request"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/dental_appointments?appointment_id=eq.' + encodeURIComponent($json.appointment_id) + '&patient_phone=eq.' + encodeURIComponent($json.patient_phone) + '&clinic_id=eq.' + encodeURIComponent($json.clinic_id) + '&select=*' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        464,
+        0
+      ],
+      "id": "find-appointment",
+      "name": "Find Patient Appointment"
+    },
+    {
+      "parameters": {
+        "jsCode": "const req=$('Normalize Manage Request').first().json;\nconst raw=$json;\nconst appt=Array.isArray(raw)?raw[0]:(Array.isArray(raw.body)?raw.body[0]:raw);\nif(!appt?.appointment_id) throw new Error('Appointment not found for this patient');\nif(['CANCELLED','COMPLETED','NO_SHOW'].includes(String(appt.status))) throw new Error('Appointment is not active');\nreturn [{json:{...req,appointment:appt}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        0
+      ],
+      "id": "normalize-found-appt",
+      "name": "Normalize Found Appointment"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/dental_dentists?dentist_id=eq.' + encodeURIComponent($json.appointment.dentist_id) + '&select=*' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        944,
+        0
+      ],
+      "id": "load-appt-dentist",
+      "name": "Load Appointment Dentist"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Normalize Found Appointment').first().json;\nconst raw=$json;\nconst dentist=Array.isArray(raw)?raw[0]:(Array.isArray(raw.body)?raw.body[0]:raw);\nif(!dentist?.dentist_id) throw new Error('Dentist configuration not found');\nreturn [{json:{...base,dentist,calendar_id:String(dentist.google_calendar_id ?? '')}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1184,
+        0
+      ],
+      "id": "merge-dentist",
+      "name": "Prepare Management Context"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "is-cancel",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "cancel",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1424,
+        0
+      ],
+      "id": "cancel-if",
+      "name": "Cancel Appointment?"
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "delete",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Prepare Management Context').first().json.calendar_id }}"
+        },
+        "eventId": "={{ $('Prepare Management Context').first().json.appointment.google_calendar_event_id }}",
+        "options": {
+          "sendUpdates": "none"
+        }
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1664,
+        -192
+      ],
+      "id": "delete-calendar-event",
+      "name": "Delete Calendar Event"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/dental_appointments?appointment_id=eq.' + encodeURIComponent($('Prepare Management Context').first().json.appointment_id) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ status:'CANCELLED', updated_at:new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1904,
+        -192
+      ],
+      "id": "mark-cancelled",
+      "name": "Mark Appointment Cancelled"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ success:true, action:'cancel', appointment_id:$('Prepare Management Context').first().json.appointment_id, status:'CANCELLED' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2144,
+        -192
+      ],
+      "id": "cancel-result",
+      "name": "Build Cancellation Result"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        2384,
+        -192
+      ],
+      "id": "return-cancel",
+      "name": "Return Cancellation"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/dental_availability_context' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ p_clinic_id:$('Prepare Management Context').first().json.clinic_id, p_dentist_id:$('Prepare Management Context').first().json.appointment.dentist_id, p_service_id:$('Prepare Management Context').first().json.appointment.service_id, p_date:$('Prepare Management Context').first().json.new_start_time.slice(0,10) }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1664,
+        112
+      ],
+      "id": "reschedule-context",
+      "name": "Load Reschedule Context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Prepare Management Context').first().json;\nconst ctx=$json;\nconst start=new Date(base.new_start_time);\nconst duration=Number(ctx.service?.duration_minutes ?? 30);\nconst buffer=Number(ctx.service?.buffer_minutes ?? 0);\nconst end=new Date(start.getTime()+duration*60000);\nconst blockedEnd=new Date(end.getTime()+buffer*60000);\nconst conflicts=(Array.isArray(ctx.appointments)?ctx.appointments:[])\n  .filter(a=>a.appointment_id!==base.appointment_id)\n  .some(a=>start<new Date(a.end_time) && blockedEnd>new Date(a.start_time));\nconst closure=(Array.isArray(ctx.closures)?ctx.closures:[])\n  .some(a=>start<new Date(a.ends_at) && blockedEnd>new Date(a.starts_at));\nreturn [{json:{\n  ...base,\n  reschedule_context:ctx,\n  new_end_time:end.toISOString(),\n  new_blocked_end_time:blockedEnd.toISOString(),\n  local_conflict:conflicts||closure\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        112
+      ],
+      "id": "prepare-reschedule",
+      "name": "Prepare Reschedule"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "no-local-conflict",
+              "leftValue": "={{ $json.local_conflict }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2144,
+        112
+      ],
+      "id": "local-conflict-if",
+      "name": "No Database Conflict?"
+    },
+    {
+      "parameters": {
+        "resource": "calendar",
+        "operation": "availability",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Prepare Reschedule').first().json.calendar_id }}"
+        },
+        "timeMin": "={{ $('Prepare Reschedule').first().json.new_start_time }}",
+        "timeMax": "={{ $('Prepare Reschedule').first().json.new_blocked_end_time }}",
+        "options": {
+          "outputFormat": "availability",
+          "timezone": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('Prepare Reschedule').first().json.reschedule_context.clinic.timezone }}"
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        2384,
+        32
+      ],
+      "id": "reschedule-availability",
+      "name": "Recheck New Calendar Slot"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "new-free",
+              "leftValue": "={{ $json.available }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2624,
+        32
+      ],
+      "id": "new-slot-if",
+      "name": "New Slot Free?"
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "update",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Prepare Reschedule').first().json.calendar_id }}"
+        },
+        "eventId": "={{ $('Prepare Reschedule').first().json.appointment.google_calendar_event_id }}",
+        "modifyTarget": "instance",
+        "useDefaultReminders": true,
+        "updateFields": {
+          "start": "={{ $('Prepare Reschedule').first().json.new_start_time }}",
+          "end": "={{ $('Prepare Reschedule').first().json.new_end_time }}"
+        },
+        "remindersUi": {}
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        2864,
+        -64
+      ],
+      "id": "update-calendar-event",
+      "name": "Update Calendar Event"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/dental_appointments?appointment_id=eq.' + encodeURIComponent($('Prepare Reschedule').first().json.appointment_id) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ start_time:$('Prepare Reschedule').first().json.new_start_time, end_time:$('Prepare Reschedule').first().json.new_end_time, status:'RESCHEDULED', updated_at:new Date().toISOString() }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3104,
+        -64
+      ],
+      "id": "persist-reschedule",
+      "name": "Persist Rescheduled Appointment"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ success:true, action:'reschedule', appointment_id:$('Prepare Reschedule').first().json.appointment_id, status:'RESCHEDULED', start_time:$('Prepare Reschedule').first().json.new_start_time, end_time:$('Prepare Reschedule').first().json.new_end_time }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        3344,
+        -64
+      ],
+      "id": "reschedule-result",
+      "name": "Build Reschedule Result"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        3584,
+        -64
+      ],
+      "id": "return-reschedule",
+      "name": "Return Reschedule"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ success:false, code:'slot_unavailable', reason:'new_slot_conflict' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2864,
+        176
+      ],
+      "id": "reschedule-conflict",
+      "name": "Build Reschedule Conflict"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 409
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        3104,
+        176
+      ],
+      "id": "return-reschedule-conflict",
+      "name": "Return Reschedule Conflict"
+    }
+  ],
+  "connections": {
+    "Manage Appointment Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Manage Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Manage Request": {
+      "main": [
+        [
+          {
+            "node": "Find Patient Appointment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Patient Appointment": {
+      "main": [
+        [
+          {
+            "node": "Normalize Found Appointment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Found Appointment": {
+      "main": [
+        [
+          {
+            "node": "Load Appointment Dentist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Appointment Dentist": {
+      "main": [
+        [
+          {
+            "node": "Prepare Management Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Management Context": {
+      "main": [
+        [
+          {
+            "node": "Cancel Appointment?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancel Appointment?": {
+      "main": [
+        [
+          {
+            "node": "Delete Calendar Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Load Reschedule Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Calendar Event": {
+      "main": [
+        [
+          {
+            "node": "Mark Appointment Cancelled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Appointment Cancelled": {
+      "main": [
+        [
+          {
+            "node": "Build Cancellation Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Cancellation Result": {
+      "main": [
+        [
+          {
+            "node": "Return Cancellation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Reschedule Context": {
+      "main": [
+        [
+          {
+            "node": "Prepare Reschedule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Reschedule": {
+      "main": [
+        [
+          {
+            "node": "No Database Conflict?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Database Conflict?": {
+      "main": [
+        [
+          {
+            "node": "Recheck New Calendar Slot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Reschedule Conflict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recheck New Calendar Slot": {
+      "main": [
+        [
+          {
+            "node": "New Slot Free?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Slot Free?": {
+      "main": [
+        [
+          {
+            "node": "Update Calendar Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Reschedule Conflict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Calendar Event": {
+      "main": [
+        [
+          {
+            "node": "Persist Rescheduled Appointment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Rescheduled Appointment": {
+      "main": [
+        [
+          {
+            "node": "Build Reschedule Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Reschedule Result": {
+      "main": [
+        [
+          {
+            "node": "Return Reschedule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Reschedule Conflict": {
+      "main": [
+        [
+          {
+            "node": "Return Reschedule Conflict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "versionId": "portfolio-dental-manage-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
