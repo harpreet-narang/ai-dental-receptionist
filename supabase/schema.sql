@@ -253,3 +253,8 @@ as $$
   from public.dental_clinics c
   where c.clinic_id = p_clinic_id;
 $$;
+
+
+alter table public.dental_appointments
+  add column if not exists confirmation_sent_at timestamptz,
+  add column if not exists reminder_24h_sent_at timestamptz;
