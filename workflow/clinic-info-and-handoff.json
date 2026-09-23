@@ -1,0 +1,324 @@
+{
+  "name": "Dental Receptionist - Clinic Info and Human Handoff",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dental-clinic-tool",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "clinic-tool-webhook",
+      "name": "Clinic Tool Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src=$json.body ?? $json;\nconst action=String(src.action ?? '').toLowerCase();\nif(!['clinic_info','request_human'].includes(action)) throw new Error('action must be clinic_info or request_human');\nif(!String(src.clinic_id ?? '').trim()) throw new Error('clinic_id is required');\nreturn [{json:{\n  action,\n  clinic_id:String(src.clinic_id),\n  patient_name:String(src.patient_name ?? ''),\n  patient_phone:String(src.patient_phone ?? ''),\n  reason:String(src.reason ?? ''),\n  urgent:Boolean(src.urgent)\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "normalize-clinic-tool",
+      "name": "Normalize Clinic Tool Request"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "info-action",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "clinic_info",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        464,
+        0
+      ],
+      "id": "info-if",
+      "name": "Clinic Information?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/dental_clinic_public_info' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ p_clinic_id:$json.clinic_id }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        704,
+        -128
+      ],
+      "id": "load-clinic-info",
+      "name": "Load Clinic Public Info"
+    },
+    {
+      "parameters": {
+        "jsCode": "const info=$json;\nif(!info?.clinic) throw new Error('Clinic not found');\nreturn [{json:{\n  success:true,\n  clinic:{\n    name:info.clinic.clinic_name,\n    address:info.clinic.address,\n    phone:info.clinic.phone,\n    whatsapp:info.clinic.whatsapp,\n    timezone:info.clinic.timezone\n  },\n  dentists:(info.dentists ?? []).map(d=>({dentist_id:d.dentist_id,name:d.dentist_name,specialty:d.specialty})),\n  services:(info.services ?? []).map(s=>({\n    service_id:s.service_id,\n    name:s.service_name,\n    duration_minutes:s.duration_minutes,\n    price_inr:s.price_inr\n  }))\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        -128
+      ],
+      "id": "public-info-response",
+      "name": "Build Clinic Info Response"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1184,
+        -128
+      ],
+      "id": "return-clinic-info",
+      "name": "Return Clinic Information"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/dental_handoffs' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ clinic_id:$json.clinic_id, patient_phone:$json.patient_phone || null, patient_name:$json.patient_name || null, reason:($json.urgent ? '[URGENT] ' : '') + ($json.reason || 'Patient requested clinic staff'), status:'OPEN' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        704,
+        128
+      ],
+      "id": "create-handoff",
+      "name": "Create Human Handoff"
+    },
+    {
+      "parameters": {
+        "jsCode": "const req=$('Normalize Clinic Tool Request').first().json;\nconst raw=$json;\nconst row=Array.isArray(raw)?(raw[0]??{}):(Array.isArray(raw.body)?(raw.body[0]??{}):raw);\nreturn [{json:{\n  success:true,\n  handoff_id:row.id ?? null,\n  status:'HUMAN_HANDOFF',\n  urgent:req.urgent,\n  message:req.urgent\n    ? 'The clinic team has been alerted. This receptionist cannot provide diagnosis or treatment advice.'\n    : 'A clinic team member should take over this conversation.'\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        128
+      ],
+      "id": "handoff-response",
+      "name": "Build Handoff Response"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.HUMAN_HANDOFF_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1184,
+        48
+      ],
+      "id": "optional-human-notify",
+      "name": "Optional Human Notification",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1184,
+        192
+      ],
+      "id": "return-handoff",
+      "name": "Return Handoff Result"
+    }
+  ],
+  "connections": {
+    "Clinic Tool Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Clinic Tool Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Clinic Tool Request": {
+      "main": [
+        [
+          {
+            "node": "Clinic Information?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clinic Information?": {
+      "main": [
+        [
+          {
+            "node": "Load Clinic Public Info",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Human Handoff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Clinic Public Info": {
+      "main": [
+        [
+          {
+            "node": "Build Clinic Info Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Clinic Info Response": {
+      "main": [
+        [
+          {
+            "node": "Return Clinic Information",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Human Handoff": {
+      "main": [
+        [
+          {
+            "node": "Build Handoff Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Handoff Response": {
+      "main": [
+        [
+          {
+            "node": "Optional Human Notification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Return Handoff Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "versionId": "portfolio-dental-clinic-tool-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
