@@ -1,0 +1,544 @@
+{
+  "name": "Dental Receptionist - Book Appointment",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dental-book-appointment",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "book-webhook",
+      "name": "Book Appointment Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src=$json.body ?? $json;\nfor(const key of ['clinic_id','patient_name','patient_phone','dentist_id','service_id','start_time']){\n  if(!String(src[key] ?? '').trim()) throw new Error(key+' is required');\n}\nconst start=new Date(src.start_time);\nif(Number.isNaN(start.getTime())) throw new Error('start_time must be ISO-8601');\nreturn [{json:{\n  clinic_id:String(src.clinic_id),\n  patient_name:String(src.patient_name).trim(),\n  patient_phone:String(src.patient_phone).trim(),\n  dentist_id:String(src.dentist_id),\n  service_id:String(src.service_id),\n  start_time:start.toISOString(),\n  requested_date:String(src.start_time).slice(0,10),\n  notes:String(src.notes ?? '')\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "normalize-booking",
+      "name": "Normalize Booking Request"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/rpc/dental_availability_context' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ p_clinic_id:$json.clinic_id, p_dentist_id:$json.dentist_id, p_service_id:$json.service_id, p_date:$json.requested_date }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        464,
+        0
+      ],
+      "id": "booking-context",
+      "name": "Load Booking Context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const req=$('Normalize Booking Request').first().json;\nconst context=$json;\nif(!context?.clinic || !context?.dentist || !context?.service) throw new Error('Booking configuration not found');\n\nconst start=new Date(req.start_time);\nconst duration=Number(context.service.duration_minutes || 30);\nconst buffer=Number(context.service.buffer_minutes || 0);\nconst end=new Date(start.getTime()+duration*60000);\nconst blockedEnd=new Date(end.getTime()+buffer*60000);\nconst tz=context.clinic.timezone || 'Asia/Kolkata';\nconst schedules=Array.isArray(context.schedule)?context.schedule:[];\nconst closures=Array.isArray(context.closures)?context.closures:[];\nconst appointments=Array.isArray(context.appointments)?context.appointments:[];\n\nfunction zonedDateTimeToUtc(dateStr,timeStr,timeZone){\n  const [y,m,d]=dateStr.split('-').map(Number);\n  const [hh,mm,ss=0]=timeStr.split(':').map(Number);\n  let guess=new Date(Date.UTC(y,m-1,d,hh,mm,ss));\n  const fmt=new Intl.DateTimeFormat('en-US',{timeZone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});\n  for(let n=0;n<2;n++){\n    const p=Object.fromEntries(fmt.formatToParts(guess).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));\n    const represented=Date.UTC(Number(p.year),Number(p.month)-1,Number(p.day),Number(p.hour),Number(p.minute),Number(p.second));\n    const wanted=Date.UTC(y,m-1,d,hh,mm,ss);\n    guess=new Date(guess.getTime()+(wanted-represented));\n  }\n  return guess;\n}\nfunction overlaps(a,b,c,d){return a<d && b>c;}\n\nlet insideSchedule=false;\nfor(const row of schedules){\n  const windowStart=zonedDateTimeToUtc(req.requested_date,String(row.start_time).slice(0,8),tz);\n  const windowEnd=zonedDateTimeToUtc(req.requested_date,String(row.end_time).slice(0,8),tz);\n  if(start>=windowStart && blockedEnd<=windowEnd){insideSchedule=true;break;}\n}\nconst dbBusy=[\n  ...appointments.map(a=>({start:new Date(a.start_time),end:new Date(a.end_time)})),\n  ...closures.map(a=>({start:new Date(a.starts_at),end:new Date(a.ends_at)}))\n];\nconst dbConflict=dbBusy.some(b=>overlaps(start,blockedEnd,b.start,b.end));\n\nconst localParts=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:tz,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(start).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));\nconst interval=Number(context.clinic.slot_interval_minutes || 30);\nconst aligns=Number(localParts.minute)%interval===0;\n\nreturn [{json:{\n  ...req,\n  context,\n  calendar_id:String(context.dentist.google_calendar_id ?? ''),\n  end_time:end.toISOString(),\n  blocked_end_time:blockedEnd.toISOString(),\n  business_rules_ok:insideSchedule && !dbConflict && aligns,\n  rejection_reason:!insideSchedule?'outside_working_hours':dbConflict?'database_conflict':!aligns?'invalid_slot_increment':''\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        704,
+        0
+      ],
+      "id": "prepare-booking",
+      "name": "Recheck Clinic Rules"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "rules-ok",
+              "leftValue": "={{ $json.business_rules_ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        944,
+        0
+      ],
+      "id": "rules-if",
+      "name": "Clinic Rules Allow Slot?"
+    },
+    {
+      "parameters": {
+        "resource": "calendar",
+        "operation": "availability",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Recheck Clinic Rules').first().json.calendar_id }}"
+        },
+        "timeMin": "={{ $('Recheck Clinic Rules').first().json.start_time }}",
+        "timeMax": "={{ $('Recheck Clinic Rules').first().json.blocked_end_time }}",
+        "options": {
+          "outputFormat": "availability",
+          "timezone": {
+            "__rl": true,
+            "mode": "id",
+            "value": "={{ $('Recheck Clinic Rules').first().json.context.clinic.timezone }}"
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1184,
+        -96
+      ],
+      "id": "recheck-calendar",
+      "name": "Recheck Google Calendar"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "calendar-free",
+              "leftValue": "={{ $json.available }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1424,
+        -96
+      ],
+      "id": "calendar-free-if",
+      "name": "Slot Still Free?"
+    },
+    {
+      "parameters": {
+        "resource": "event",
+        "operation": "create",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Recheck Clinic Rules').first().json.calendar_id }}"
+        },
+        "start": "={{ $('Recheck Clinic Rules').first().json.start_time }}",
+        "end": "={{ $('Recheck Clinic Rules').first().json.end_time }}",
+        "useDefaultReminders": true,
+        "additionalFields": {
+          "summary": "={{ $('Recheck Clinic Rules').first().json.context.service.service_name + ' - ' + $('Recheck Clinic Rules').first().json.patient_name }}",
+          "description": "={{ 'AI receptionist booking | Phone: ' + $('Recheck Clinic Rules').first().json.patient_phone + ( $('Recheck Clinic Rules').first().json.notes ? ' | Notes: ' + $('Recheck Clinic Rules').first().json.notes : '' ) }}",
+          "showMeAs": "opaque",
+          "visibility": "private"
+        },
+        "remindersUi": {}
+      },
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        1664,
+        -192
+      ],
+      "id": "create-calendar-event",
+      "name": "Create Google Calendar Event"
+    },
+    {
+      "parameters": {
+        "jsCode": "const b=$('Recheck Clinic Rules').first().json;\nconst event=$json;\nreturn [{json:{...b,google_calendar_event_id:String(event.id ?? ''),calendar_event:event}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        -192
+      ],
+      "id": "merge-calendar-booking",
+      "name": "Prepare Appointment Record"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL + '/rest/v1/dental_appointments' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ clinic_id:$json.clinic_id, dentist_id:$json.dentist_id, service_id:$json.service_id, patient_name:$json.patient_name, patient_phone:$json.patient_phone, start_time:$json.start_time, end_time:$json.end_time, status:'CONFIRMED', google_calendar_event_id:$json.google_calendar_event_id, source:'voice_ai', notes:$json.notes || null }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2144,
+        -192
+      ],
+      "id": "persist-appointment",
+      "name": "Persist Confirmed Appointment"
+    },
+    {
+      "parameters": {
+        "jsCode": "const base=$('Prepare Appointment Record').first().json;\nconst raw=$json;\nconst row=Array.isArray(raw)?(raw[0]??{}):(Array.isArray(raw.body)?(raw.body[0]??{}):raw);\nreturn [{json:{\n  success:true,\n  appointment_id:row.appointment_id ?? null,\n  patient_name:base.patient_name,\n  patient_phone:base.patient_phone,\n  dentist_name:base.context.dentist.dentist_name,\n  service_name:base.context.service.service_name,\n  start_time:base.start_time,\n  end_time:base.end_time,\n  timezone:base.context.clinic.timezone,\n  clinic_name:base.context.clinic.clinic_name\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2384,
+        -192
+      ],
+      "id": "booking-success",
+      "name": "Build Booking Success"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/' + $env.META_GRAPH_API_VERSION + '/' + $env.WHATSAPP_PHONE_NUMBER_ID + '/messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ messaging_product:'whatsapp', to:$json.patient_phone.replace('+',''), type:'text', text:{ body:'Your appointment at ' + $json.clinic_name + ' is confirmed for ' + $json.start_time + ' with ' + $json.dentist_name + '.' } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2624,
+        -304
+      ],
+      "id": "whatsapp-confirmation",
+      "name": "Optional WhatsApp Confirmation",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        2624,
+        -144
+      ],
+      "id": "return-booking",
+      "name": "Return Booking Confirmation"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ success:false, code:'slot_unavailable', reason:$('Recheck Clinic Rules').first().json.rejection_reason || 'clinic_rules_rejected_slot' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1184,
+        112
+      ],
+      "id": "rules-rejected",
+      "name": "Clinic Rules Rejected Slot"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ JSON.stringify({ success:false, code:'slot_unavailable', reason:'google_calendar_conflict' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1664,
+        32
+      ],
+      "id": "calendar-rejected",
+      "name": "Calendar Conflict Result"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 409
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1904,
+        64
+      ],
+      "id": "return-conflict",
+      "name": "Return Slot Conflict"
+    }
+  ],
+  "connections": {
+    "Book Appointment Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Booking Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Booking Request": {
+      "main": [
+        [
+          {
+            "node": "Load Booking Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Booking Context": {
+      "main": [
+        [
+          {
+            "node": "Recheck Clinic Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recheck Clinic Rules": {
+      "main": [
+        [
+          {
+            "node": "Clinic Rules Allow Slot?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clinic Rules Allow Slot?": {
+      "main": [
+        [
+          {
+            "node": "Recheck Google Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Clinic Rules Rejected Slot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recheck Google Calendar": {
+      "main": [
+        [
+          {
+            "node": "Slot Still Free?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slot Still Free?": {
+      "main": [
+        [
+          {
+            "node": "Create Google Calendar Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Calendar Conflict Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Google Calendar Event": {
+      "main": [
+        [
+          {
+            "node": "Prepare Appointment Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Appointment Record": {
+      "main": [
+        [
+          {
+            "node": "Persist Confirmed Appointment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Confirmed Appointment": {
+      "main": [
+        [
+          {
+            "node": "Build Booking Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Booking Success": {
+      "main": [
+        [
+          {
+            "node": "Optional WhatsApp Confirmation",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Return Booking Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clinic Rules Rejected Slot": {
+      "main": [
+        [
+          {
+            "node": "Return Slot Conflict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calendar Conflict Result": {
+      "main": [
+        [
+          {
+            "node": "Return Slot Conflict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "versionId": "portfolio-dental-booking-v1",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
