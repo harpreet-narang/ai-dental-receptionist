@@ -228,3 +228,28 @@ as $$
         and ds.service_id = p_service_id
     );
 $$;
+
+
+create or replace function public.dental_clinic_public_info(
+  p_clinic_id text
+)
+returns jsonb
+language sql
+stable
+as $$
+  select jsonb_build_object(
+    'clinic', to_jsonb(c),
+    'services', coalesce((
+      select jsonb_agg(to_jsonb(s) order by s.service_name)
+      from public.dental_services s
+      where s.clinic_id = p_clinic_id and s.active = true
+    ), '[]'::jsonb),
+    'dentists', coalesce((
+      select jsonb_agg(to_jsonb(d) order by d.dentist_name)
+      from public.dental_dentists d
+      where d.clinic_id = p_clinic_id and d.active = true
+    ), '[]'::jsonb)
+  )
+  from public.dental_clinics c
+  where c.clinic_id = p_clinic_id;
+$$;
